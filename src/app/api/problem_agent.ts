@@ -1,6 +1,7 @@
 import { generateText, Output } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
+import type { RunCallbacks } from '@/lib/run-events';
 
 /** A single chat message with sender and content. */
 export interface ChatMessage {
@@ -40,6 +41,12 @@ const conversationResponseSchema = z.object({
   message: z.string(),
   can_generate_problem: z.string(),
 });
+
+interface StreamedGenerationOptions {
+  callbacks?: RunCallbacks;
+  messageId?: string;
+  abortSignal?: AbortSignal;
+}
 
 const PROBLEM_AGENT_SYSTEM_PROMPT = `You are an expert at framing policy debate problems. Given a conversation (as a transcript), extract or formulate a well-defined debate problem and fill in the following fields. Respond ONLY with valid JSON matching the schema.
 
@@ -82,8 +89,10 @@ function formatMessagesAsTranscript(messages: ChatMessage[]): string {
  */
 export async function generate_problem(
   messages: ChatMessage[],
+  options?: StreamedGenerationOptions,
 ): Promise<Problem> {
   const transcript = formatMessagesAsTranscript(messages);
+
   const result = await generateText({
     model: openai('gpt-4o'),
     system: PROBLEM_AGENT_SYSTEM_PROMPT,
@@ -94,13 +103,11 @@ export async function generate_problem(
       description:
         'A structured policy debate problem with question, scope, time horizon, jurisdiction, and constraints.',
     }),
+    abortSignal: options?.abortSignal,
   });
+  const output = result.output;
 
-  if (result.output == null) {
-    throw new Error('Model did not return a valid Problem object.');
-  }
-
-  return result.output as Problem;
+  return problemSchema.parse(output);
 }
 
 /**
@@ -114,9 +121,13 @@ export async function generate_problem(
  */
 export async function generate_chatbot_response(
   messages: ChatMessage[],
+  options?: StreamedGenerationOptions,
 ): Promise<ConversationResponse> {
+  const callbacks = options?.callbacks;
+  const messageId = options?.messageId ?? crypto.randomUUID();
   const transcript =
     messages.length > 0 ? formatMessagesAsTranscript(messages) : '(No messages yet)';
+
   const result = await generateText({
     model: openai('gpt-4o'),
     system: CHATBOT_SYSTEM_PROMPT,
@@ -127,11 +138,16 @@ export async function generate_chatbot_response(
       description:
         'Assistant message and whether there is enough information to generate a problem (yes/no).',
     }),
+    abortSignal: options?.abortSignal,
   });
+  const output = result.output;
+  const parsed = conversationResponseSchema.parse(output);
 
-  if (result.output == null) {
-    throw new Error('Model did not return a valid ConversationResponse.');
-  }
-
-  return result.output as ConversationResponse;
+  callbacks?.onModelOutput?.({
+    kind: 'chat_response',
+    title: 'Assistant',
+    content: parsed.message,
+    messageId,
+  });
+  return parsed;
 }

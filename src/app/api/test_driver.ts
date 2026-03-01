@@ -7,14 +7,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import {
-  generate_chatbot_response,
-  generate_problem,
-  type ChatMessage,
-} from './problem_agent';
-import { generateThesis } from './research_agent';
-import { generate_questions } from './question_generation';
-import { runDebateLoop } from './debate_loop';
+import { type ChatMessage } from './problem_agent';
+import { runChatTurn, runDebateSequence } from './_core/debate_orchestrator';
 
 function loadEnvLocal(): void {
   try {
@@ -71,7 +65,7 @@ async function main(): Promise<void> {
     messages.push({ sender: 'User', message: userInput });
 
     try {
-      const response = await generate_chatbot_response(messages);
+      const { response } = await runChatTurn(messages);
       console.log(`\nAssistant: ${response.message}\n`);
 
       messages.push({ sender: 'Assistant', message: response.message });
@@ -82,59 +76,33 @@ async function main(): Promise<void> {
 
       if (canGenerate) {
         console.log('Generating problem from conversation...\n');
-        const problem = await generate_problem(messages);
-        printJsonSection('Generated Problem', problem);
-
         const firstAgentPoliticalViews = await prompt(
           "Enter the first agent's political views (e.g. ideology, priorities, constraints): ",
         );
         if (!firstAgentPoliticalViews.trim()) {
           console.log('No first agent political views entered. Skipping thesis generation.');
         } else {
-          console.log('\nGenerating first thesis...\n');
+          console.log('\nRunning full debate sequence...\n');
           try {
-            const firstThesis = await generateThesis(firstAgentPoliticalViews.trim(), problem);
-            printJsonSection('First Agent Thesis', firstThesis);
-
             const secondAgentPoliticalViews = await prompt(
               "Enter the second agent's political views: ",
             );
             if (!secondAgentPoliticalViews.trim()) {
               console.log('No second agent political views entered. Skipping second thesis generation.');
             } else {
-              console.log('\nGenerating second thesis...\n');
-              const secondThesis = await generateThesis(secondAgentPoliticalViews.trim(), problem);
-              printJsonSection('Second Agent Thesis', secondThesis);
-
-              console.log('Generating 5 cross-examination questions for each agent...\n');
-              const firstAgentQuestionsForSecond: string[] = await generate_questions(
-                problem,
-                firstAgentPoliticalViews.trim(),
-                secondThesis,
-                5,
+              const runResult = await runDebateSequence(
+                {
+                  messages,
+                  firstIdeology: firstAgentPoliticalViews.trim(),
+                  secondIdeology: secondAgentPoliticalViews.trim(),
+                },
+                {
+                  onStage: ({ message }) => console.log(`${message}...\n`),
+                  onModelOutput: ({ title, content }) => printJsonSection(title, content),
+                  onActivity: ({ message }) => console.log(`[activity] ${message}`),
+                },
               );
-              const secondAgentQuestionsForFirst: string[] = await generate_questions(
-                problem,
-                secondAgentPoliticalViews.trim(),
-                firstThesis,
-                5,
-              );
-
-              printJsonSection('First Agent Questions For Second Thesis', firstAgentQuestionsForSecond);
-              printJsonSection('Second Agent Questions For First Thesis', secondAgentQuestionsForFirst);
-
-              console.log('Running structured debate loop...\n');
-              const debateResult = await runDebateLoop({
-                problem,
-                firstIdeology: firstAgentPoliticalViews.trim(),
-                secondIdeology: secondAgentPoliticalViews.trim(),
-                firstThesis,
-                secondThesis,
-                firstAgentQuestionsForSecond,
-                secondAgentQuestionsForFirst,
-              });
-
-              printJsonSection('Debate Loop Result', debateResult);
+              printJsonSection('Debate Loop Result', runResult.debateResult);
             }
           } catch (err) {
             console.error(

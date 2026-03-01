@@ -2,6 +2,13 @@ import { generateText, Output } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { type Problem } from './problem_agent';
+import type { RunCallbacks } from '@/lib/run-events';
+
+interface GenerateQuestionsOptions {
+  callbacks?: RunCallbacks;
+  messageId?: string;
+  abortSignal?: AbortSignal;
+}
 
 /**
  * Generates a list of cross-examination questions for an opposing thesis.
@@ -17,6 +24,7 @@ export async function generate_questions(
   politicalIdeology: string,
   opposingThesis: unknown,
   n: number,
+  options?: GenerateQuestionsOptions,
 ): Promise<string[]> {
   if (!Number.isInteger(n) || n <= 0) {
     throw new Error('n must be a positive integer.');
@@ -25,6 +33,9 @@ export async function generate_questions(
   const questionListSchema = z.object({
     questions: z.array(z.string().min(1)).length(n),
   });
+
+  const callbacks = options?.callbacks;
+  const messageId = options?.messageId ?? crypto.randomUUID();
 
   const result = await generateText({
     model: openai('gpt-4o'),
@@ -50,11 +61,20 @@ ${JSON.stringify(opposingThesis, null, 2)}
       name: 'QuestionList',
       description: `A list of exactly ${n} cross-examination questions.`,
     }),
+    abortSignal: options?.abortSignal,
   });
+  const output = result.output;
 
-  if (result.output == null) {
+  if (output == null) {
     throw new Error('Model did not return a valid question list.');
   }
 
-  return result.output.questions;
+  callbacks?.onModelOutput?.({
+    kind: 'questions',
+    title: 'Cross-Examination Questions',
+    content: output.questions,
+    messageId,
+  });
+
+  return output.questions;
 }

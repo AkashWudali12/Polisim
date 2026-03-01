@@ -2,6 +2,7 @@ import { generateText, Output, tool, stepCountIs } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { Problem } from './problem_agent';
+import type { RunCallbacks } from '@/lib/run-events';
 
 interface Evidence {
     source: string;
@@ -48,6 +49,23 @@ function logThesisUpdate(part: string, update: string | Evidence): void {
         console.log(JSON.stringify(update, null, 2));
     }
     console.log('---------------------\n');
+}
+
+function mapResearchToolToActivity(toolName: string): string {
+    switch (toolName) {
+        case 'webSearch':
+        case 'extractUrl':
+            return 'Consulting sources';
+        case 'getAvailableContext':
+        case 'getContext':
+            return 'Reviewing context';
+        case 'getThesisField':
+            return 'Checking thesis progress';
+        case 'getSearchedLinks':
+            return 'Checking prior source coverage';
+        default:
+            return 'Using tools';
+    }
 }
 
 const thesis: PolicyThesis = {
@@ -444,14 +462,26 @@ function thesisStatusPromptBlock(currentThesis: PolicyThesis): string {
 - risk_scenarios: ${riskScenariosDone ? 'done' : 'not done'}`;
 }
 
-export async function generateThesis(political_views: string, problem: Problem) {
+interface GenerateThesisOptions {
+    callbacks?: RunCallbacks;
+    abortSignal?: AbortSignal;
+}
+
+export async function generateThesis(
+    political_views: string,
+    problem: Problem,
+    options?: GenerateThesisOptions,
+) {
     const systemPrompt = getSystemPrompt(political_views, problem);
+    const callbacks = options?.callbacks;
 
     const outputDescription =
         'JSON with message (string or Evidence: source, quote, reasoning) and thesis_field: -1 when done, or 1–5 for thesis, evidence, cost_estimate, weaknesses, risk_scenarios.';
 
     while (true) {
+        callbacks?.onActivity?.({ kind: 'thinking', message: 'Analyzing next thesis update' });
         const statusBlock = thesisStatusPromptBlock(thesis);
+        const messageId = crypto.randomUUID();
         const response = await generateText({
             model: openai('gpt-5.2'),
             system: systemPrompt,
@@ -481,19 +511,28 @@ Rules:
                 extractUrl,
             },
             experimental_onToolCallStart: ({ toolCall }) => {
-                logResearchToolCall(toolCall.toolName, toolCall.input ?? {});
+                const activityMessage = mapResearchToolToActivity(toolCall.toolName);
+                callbacks?.onActivity?.({ kind: 'tool_activity', message: activityMessage });
+                if (callbacks == null) {
+                    logResearchToolCall(toolCall.toolName, toolCall.input ?? {});
+                }
             },
             stopWhen: stepCountIs(10),
+            abortSignal: options?.abortSignal,
         });
+        const output = response.output;
 
-        if (response == null || response.output == null) {
+        if (output == null) {
             continue;
         }
 
-        const researchResponse = response.output as ResearchResponse;
+        const researchResponse = output as ResearchResponse;
 
         if (researchResponse.thesis_field === -1) {
-            console.log('Thesis complete');
+            callbacks?.onActivity?.({ kind: 'thinking', message: 'Thesis generation complete' });
+            if (callbacks == null) {
+                console.log('Thesis complete');
+            }
             return cleanUp();
         }
 
@@ -504,25 +543,65 @@ Rules:
         switch (researchResponse.thesis_field) {
             case 1:
                 thesis.thesis = researchResponse.message as string;
-                logThesisUpdate(THESIS_FIELD_NAMES[1], researchResponse.message);
+                callbacks?.onModelOutput?.({
+                    kind: 'thesis',
+                    title: 'Thesis Update',
+                    content: { part: THESIS_FIELD_NAMES[1], update: researchResponse.message },
+                    messageId,
+                });
+                if (callbacks == null) {
+                    logThesisUpdate(THESIS_FIELD_NAMES[1], researchResponse.message);
+                }
                 break;
             case 2: 
                 const payload = researchResponse.message as Evidence;
                 thesis.evidence.push(payload);
                 await add_message_to_context(JSON.stringify(payload));
-                logThesisUpdate(THESIS_FIELD_NAMES[2], payload);
+                callbacks?.onModelOutput?.({
+                    kind: 'thesis',
+                    title: 'Thesis Update',
+                    content: { part: THESIS_FIELD_NAMES[2], update: payload },
+                    messageId,
+                });
+                if (callbacks == null) {
+                    logThesisUpdate(THESIS_FIELD_NAMES[2], payload);
+                }
                 break;
             case 3:
                 thesis.cost_estimate = researchResponse.message as string;
-                logThesisUpdate(THESIS_FIELD_NAMES[3], researchResponse.message);
+                callbacks?.onModelOutput?.({
+                    kind: 'thesis',
+                    title: 'Thesis Update',
+                    content: { part: THESIS_FIELD_NAMES[3], update: researchResponse.message },
+                    messageId,
+                });
+                if (callbacks == null) {
+                    logThesisUpdate(THESIS_FIELD_NAMES[3], researchResponse.message);
+                }
                 break;
             case 4:
                 thesis.weaknesses = researchResponse.message as string;
-                logThesisUpdate(THESIS_FIELD_NAMES[4], researchResponse.message);
+                callbacks?.onModelOutput?.({
+                    kind: 'thesis',
+                    title: 'Thesis Update',
+                    content: { part: THESIS_FIELD_NAMES[4], update: researchResponse.message },
+                    messageId,
+                });
+                if (callbacks == null) {
+                    logThesisUpdate(THESIS_FIELD_NAMES[4], researchResponse.message);
+                }
                 break;
             case 5:
                 thesis.risk_scenarios = researchResponse.message as string;
-                logThesisUpdate(THESIS_FIELD_NAMES[5], researchResponse.message);
+                callbacks?.onModelOutput?.({
+                    kind: 'thesis',
+                    title: 'Thesis Update',
+                    content: { part: THESIS_FIELD_NAMES[5], update: researchResponse.message },
+                    messageId,
+                });
+                if (callbacks == null) {
+                    logThesisUpdate(THESIS_FIELD_NAMES[5], researchResponse.message);
+                }
                 break;
             default:
                 throw new Error('Invalid thesis field.');
