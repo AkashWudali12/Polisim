@@ -190,6 +190,8 @@ export default function Home() {
       });
       setRunInProgress(false);
       setActivity(null);
+      setCanGenerate(false);
+      setMessages([]);
       return;
     }
 
@@ -201,6 +203,8 @@ export default function Home() {
       });
       setRunInProgress(false);
       setActivity(null);
+      setCanGenerate(false);
+      setMessages([]);
     }
   };
 

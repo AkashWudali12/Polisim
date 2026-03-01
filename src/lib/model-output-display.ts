@@ -138,6 +138,59 @@ function asStringArray(value: unknown): string[] | null {
   return value.map((entry) => toText(entry)).filter((entry) => entry.trim().length > 0);
 }
 
+interface EvidenceEntry {
+  source: string;
+  quote: string;
+  reasoning: string;
+}
+
+interface CrossfireQAPair {
+  question: string;
+  answer: string;
+}
+
+function asEvidenceArray(value: unknown): EvidenceEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const parsed = value
+    .map((entry) => {
+      const record = asRecord(entry);
+      if (!record) return null;
+      if (!('source' in record) || !('quote' in record) || !('reasoning' in record)) return null;
+      return {
+        source: toText(record.source),
+        quote: toText(record.quote),
+        reasoning: toText(record.reasoning),
+      };
+    })
+    .filter((entry): entry is EvidenceEntry => entry != null);
+  return parsed.length === value.length ? parsed : null;
+}
+
+function asCrossfirePairArray(value: unknown): CrossfireQAPair[] | null {
+  if (!Array.isArray(value)) return null;
+  const parsed = value
+    .map((entry) => {
+      const record = asRecord(entry);
+      if (!record) return null;
+      if (!('question' in record) || !('answer' in record)) return null;
+      return {
+        question: toText(record.question),
+        answer: toText(record.answer),
+      };
+    })
+    .filter((entry): entry is CrossfireQAPair => entry != null);
+  return parsed.length === value.length ? parsed : null;
+}
+
+function toCrossfireMarkdown(pairs: CrossfireQAPair[]): string {
+  return pairs
+    .map(
+      (pair, index) =>
+        `**Q${index + 1}:** ${pair.question.trim() || 'N/A'}\n\n**A${index + 1}:** ${pair.answer.trim() || 'N/A'}`,
+    )
+    .join('\n\n---\n\n');
+}
+
 function toRawJson(value: unknown): string | undefined {
   if (value == null) return undefined;
   if (typeof value === 'string') return undefined;
@@ -215,7 +268,25 @@ function normalizeThesis(content: unknown): StructuredDisplayContent | null {
     };
   }
 
-  const evidence = asStringArray(data.evidence);
+  const evidenceEntries = asEvidenceArray(data.evidence);
+  const evidenceList = asStringArray(data.evidence);
+  const evidenceBlocks =
+    evidenceEntries && evidenceEntries.length > 0
+      ? evidenceEntries.map(
+          (entry, index): DisplayBlock => ({
+            type: 'key_value',
+            title: `Evidence ${index + 1}`,
+            entries: [
+              { label: 'Source', value: entry.source },
+              { label: 'Quote', value: entry.quote },
+              { label: 'Reasoning', value: entry.reasoning },
+            ],
+          }),
+        )
+      : evidenceList && evidenceList.length > 0
+        ? [{ type: 'list' as const, title: 'Evidence', items: evidenceList }]
+        : [];
+
   return {
     blocks: [
       {
@@ -228,9 +299,7 @@ function normalizeThesis(content: unknown): StructuredDisplayContent | null {
           { label: 'Risk Scenarios', value: toText(data.risk_scenarios) },
         ],
       },
-      ...(evidence && evidence.length > 0
-        ? [{ type: 'list' as const, title: 'Evidence', items: evidence }]
-        : []),
+      ...evidenceBlocks,
     ],
     rawJson: toRawJson(content),
   };
@@ -268,16 +337,74 @@ function normalizeDebateResult(content: unknown): StructuredDisplayContent | nul
     entries.push({ label: 'Accepted By', value: acceptedBy });
   }
 
+  const blocks: DisplayBlock[] = [{ type: 'key_value', title: 'Debate Resolution', entries }];
   const solutionText = toText(resolution.solutionText ?? resolution.solution_text);
+  if (solutionText.trim().length > 0) {
+    blocks.push({ type: 'markdown', title: 'Proposed Solution', markdown: solutionText });
+  }
+
+  const crossfireRecord = asRecord(data.crossfire);
+  const firstAgentPairs = asCrossfirePairArray(crossfireRecord?.firstAgentCrossfire);
+  const secondAgentPairs = asCrossfirePairArray(crossfireRecord?.secondAgentCrossfire);
+  if (firstAgentPairs && firstAgentPairs.length > 0) {
+    blocks.push({
+      type: 'markdown',
+      title: 'Crossfire Q&A (First asked, Second answered)',
+      markdown: toCrossfireMarkdown(firstAgentPairs),
+    });
+  }
+  if (secondAgentPairs && secondAgentPairs.length > 0) {
+    blocks.push({
+      type: 'markdown',
+      title: 'Crossfire Q&A (Second asked, First answered)',
+      markdown: toCrossfireMarkdown(secondAgentPairs),
+    });
+  }
+
   return {
-    blocks: [
-      { type: 'key_value', title: 'Debate Resolution', entries },
-      ...(solutionText.trim().length > 0
-        ? [{ type: 'markdown' as const, title: 'Proposed Solution', markdown: solutionText }]
-        : []),
-    ],
+    blocks,
     rawJson: toRawJson(content),
   };
+}
+
+function normalizeDebateTurn(content: unknown): StructuredDisplayContent | null {
+  const data = asRecord(content);
+  if (!data) return null;
+
+  if ('question' in data && 'answer' in data) {
+    return {
+      blocks: [
+        {
+          type: 'key_value',
+          title: 'Crossfire Q&A Pair',
+          entries: [
+            { label: 'Question', value: toText(data.question) },
+            { label: 'Answer', value: toText(data.answer) },
+          ],
+        },
+      ],
+      rawJson: toRawJson(content),
+    };
+  }
+
+  if ('speaker' in data && 'kind' in data && 'content' in data) {
+    return {
+      blocks: [
+        {
+          type: 'key_value',
+          title: 'Debate Turn',
+          entries: [
+            { label: 'Speaker', value: toText(data.speaker) },
+            { label: 'Turn Type', value: toText(data.kind).replace(/_/g, ' ') },
+            { label: 'Message', value: toText(data.content) },
+          ],
+        },
+      ],
+      rawJson: toRawJson(content),
+    };
+  }
+
+  return null;
 }
 
 export function normalizeModelOutputForDisplay(event: ModelOutputEvent): StructuredDisplayContent {
@@ -297,6 +424,11 @@ export function normalizeModelOutputForDisplay(event: ModelOutputEvent): Structu
 
   if (event.kind === 'questions') {
     const normalized = normalizeQuestions(event.content);
+    if (normalized) return normalized;
+  }
+
+  if (event.kind === 'debate_turn') {
+    const normalized = normalizeDebateTurn(event.content);
     if (normalized) return normalized;
   }
 
