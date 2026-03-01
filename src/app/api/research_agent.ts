@@ -90,6 +90,17 @@ const searchedQueryCache = new Set<string>();
 const searchedLinkCache = new Set<string>();
 const TAVILY_API_URL = 'https://api.tavily.com';
 
+export function resetResearchState(): void {
+    thesis.thesis = '';
+    thesis.evidence = [];
+    thesis.cost_estimate = '';
+    thesis.weaknesses = '';
+    thesis.risk_scenarios = '';
+    contextCache.clear();
+    searchedQueryCache.clear();
+    searchedLinkCache.clear();
+}
+
 function normalizeQuery(query: string): string {
     return query.trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -433,15 +444,7 @@ function cleanUp(): PolicyThesis {
         weaknesses: thesis.weaknesses,
         risk_scenarios: thesis.risk_scenarios,
     };
-
-    thesis.thesis = '';
-    thesis.evidence = [];
-    thesis.cost_estimate = '';
-    thesis.weaknesses = '';
-    thesis.risk_scenarios = '';
-    contextCache.clear();
-    searchedQueryCache.clear();
-    searchedLinkCache.clear();
+    resetResearchState();
 
     return thesisCopy;
 }

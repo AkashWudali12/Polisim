@@ -53,7 +53,9 @@ export function AssistantMessageBody({ content }: AssistantMessageBodyProps) {
                   <dt className="text-[11px] font-semibold uppercase tracking-wide text-[#6b2130] dark:text-[#6b2130]">
                     {entry.label}
                   </dt>
-                  <dd className="mt-1 whitespace-pre-wrap text-[#6b2130] dark:text-[#6b2130]">{entry.value}</dd>
+                  <dd className="mt-1 text-[#6b2130] dark:text-[#6b2130]">
+                    <MarkdownRenderer content={entry.value} />
+                  </dd>
                 </div>
               ))}
             </dl>
