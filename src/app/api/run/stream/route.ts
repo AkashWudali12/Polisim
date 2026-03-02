@@ -6,7 +6,7 @@ import { nowEventTimestamp, type RunEvent } from '@/lib/run-events';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 /** Maximum serverless execution time (seconds). Vercel Hobby: up to 300; Pro: up to 800. Heartbeats keep the SSE connection alive; this sets how long the function may run. */
-export const maxDuration = 300;
+export const maxDuration = 700;
 
 function parseMessages(raw: string | null): ChatMessage[] | null {
   if (raw == null) return null;
