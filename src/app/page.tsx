@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ModelOutputEvent, RunEvent, RunStage } from '@/lib/run-events';
 import {
   normalizeModelOutputForDisplay,
@@ -73,24 +73,12 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [activity, setActivity] = useState<ActivityState | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const [chatJobId, setChatJobId] = useState<string | null>(null);
+  const [chatMessageIndex, setChatMessageIndex] = useState(0);
+  const [debateJobId, setDebateJobId] = useState<string | null>(null);
+  const [debateEventIndex, setDebateEventIndex] = useState(0);
   const debateResultSeenRef = useRef(false);
   const chatViewportRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (chatViewportRef.current) {
-      chatViewportRef.current.scrollTop = chatViewportRef.current.scrollHeight;
-    }
-  }, [threadItems, chatLoading, activity]);
 
   const stageLabel = useMemo(() => {
     if (currentStage == null) return 'Idle';
@@ -114,11 +102,12 @@ export default function Home() {
     }
   }, [currentStage]);
 
-  const appendThreadItem = (item: ThreadItem) => {
+  const appendThreadItem = useCallback((item: ThreadItem) => {
     setThreadItems((prev) => [...prev, item]);
-  };
+  }, []);
 
-  const applyRunEvent = (event: RunEvent) => {
+  const applyRunEvent = useCallback(
+    (event: RunEvent) => {
     if (event.type === 'run_stage') {
       setCurrentStage(event.stage);
       appendThreadItem({
@@ -206,7 +195,114 @@ export default function Home() {
       setCanGenerate(false);
       setMessages([]);
     }
-  };
+    },
+    [appendThreadItem],
+  );
+
+  useEffect(() => {
+    if (!debateJobId || !runInProgress) return;
+
+    const POLL_INTERVAL_MS = 1500;
+
+    const intervalId = setInterval(async () => {
+      try {
+        const params = new URLSearchParams();
+        params.set('jobId', debateJobId);
+        params.set('fromIndex', String(debateEventIndex));
+        const response = await fetch(`/api/run/status?${params.toString()}`);
+        if (!response.ok) {
+          const data = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(data?.error ?? 'Failed to fetch debate status');
+        }
+
+        const data = (await response.json()) as {
+          events: RunEvent[];
+          nextIndex: number;
+          status: 'pending' | 'running' | 'completed' | 'error';
+          errorMessage?: string;
+        };
+
+        if (Array.isArray(data.events) && data.events.length > 0) {
+          for (const event of data.events) {
+            applyRunEvent(event);
+          }
+          setDebateEventIndex(data.nextIndex);
+        }
+
+        if (data.status === 'completed' || data.status === 'error') {
+          if (data.errorMessage) {
+            setErrorMessage(data.errorMessage);
+          }
+          setRunInProgress(false);
+          setDebateJobId(null);
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : 'Failed to poll debate status');
+        setRunInProgress(false);
+        setDebateJobId(null);
+      }
+    }, POLL_INTERVAL_MS);
+
+    return () => clearInterval(intervalId);
+  }, [debateJobId, debateEventIndex, runInProgress, applyRunEvent]);
+
+  useEffect(() => {
+    if (!chatJobId || !chatLoading) return;
+
+    const POLL_INTERVAL_MS = 1000;
+
+    const intervalId = setInterval(async () => {
+      try {
+        const params = new URLSearchParams();
+        params.set('jobId', chatJobId);
+        params.set('fromIndex', String(chatMessageIndex));
+        const response = await fetch(`/api/chat/turn/status?${params.toString()}`);
+        if (!response.ok) {
+          const data = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(data?.error ?? 'Failed to fetch chat status');
+        }
+
+        const data = (await response.json()) as {
+          messages: ChatTurnResponse[];
+          nextIndex: number;
+          status: 'pending' | 'running' | 'completed' | 'error';
+          errorMessage?: string;
+        };
+
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          for (const payload of data.messages) {
+            const assistantMessage: ChatMessage = {
+              sender: 'Assistant',
+              message: payload.message,
+            };
+            setMessages((prev) => [...prev, assistantMessage]);
+            appendThreadItem({
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              text: payload.message,
+              structuredContent: markdownOnlyContent(payload.message),
+            });
+            setCanGenerate(isTruthyYes(payload.can_generate_problem));
+          }
+          setChatMessageIndex(data.nextIndex);
+        }
+
+        if (data.status === 'completed' || data.status === 'error') {
+          if (data.errorMessage) {
+            setErrorMessage(data.errorMessage);
+          }
+          setChatLoading(false);
+          setChatJobId(null);
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : 'Failed to poll chat status');
+        setChatLoading(false);
+        setChatJobId(null);
+      }
+    }, POLL_INTERVAL_MS);
+
+    return () => clearInterval(intervalId);
+  }, [chatJobId, chatLoading, chatMessageIndex, appendThreadItem]);
 
   const sendChatTurn = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -228,7 +324,7 @@ export default function Home() {
     setChatInput('');
 
     try {
-      const response = await fetch('/api/chat/turn', {
+      const response = await fetch('/api/chat/turn/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: updatedMessages }),
@@ -236,26 +332,14 @@ export default function Home() {
 
       if (!response.ok) {
         const data = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(data?.error ?? 'Failed to fetch chat turn');
+        throw new Error(data?.error ?? 'Failed to start chat turn');
       }
 
-      const payload = (await response.json()) as ChatTurnResponse;
-      const assistantMessage: ChatMessage = {
-        sender: 'Assistant',
-        message: payload.message,
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
-      appendThreadItem({
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        text: payload.message,
-        structuredContent: markdownOnlyContent(payload.message),
-      });
-      setCanGenerate(isTruthyYes(payload.can_generate_problem));
+      const data = (await response.json()) as { jobId: string };
+      setChatJobId(data.jobId);
+      setChatMessageIndex(0);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unknown error');
-    } finally {
       setChatLoading(false);
     }
   };
@@ -265,11 +349,6 @@ export default function Home() {
     if (!firstIdeology.trim() || !secondIdeology.trim()) {
       setErrorMessage('Please provide both ideologies before starting.');
       return;
-    }
-
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
     }
 
     setErrorMessage(null);
@@ -283,35 +362,34 @@ export default function Home() {
       text: 'Starting full debate run.',
     });
 
-    const url = new URL('/api/run/stream', window.location.origin);
-    url.searchParams.set('messages', JSON.stringify(messages));
-    url.searchParams.set('firstIdeology', firstIdeology);
-    url.searchParams.set('secondIdeology', secondIdeology);
-
-    const source = new EventSource(url.toString());
-    eventSourceRef.current = source;
-
-    source.onmessage = (messageEvent) => {
+    const startDebate = async () => {
       try {
-        const event = JSON.parse(messageEvent.data) as RunEvent;
-        applyRunEvent(event);
+        const response = await fetch('/api/run/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages,
+            firstIdeology: firstIdeology.trim(),
+            secondIdeology: secondIdeology.trim(),
+          }),
+        });
 
-        if (event.type === 'run_error' || event.type === 'run_done') {
-          source.close();
-          eventSourceRef.current = null;
+        if (!response.ok) {
+          const data = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(data?.error ?? 'Failed to start debate run');
         }
-      } catch {
-        // Ignore malformed SSE entries.
+
+        const data = (await response.json()) as { jobId: string };
+        setDebateJobId(data.jobId);
+        setDebateEventIndex(0);
+      } catch (error) {
+        setRunInProgress(false);
+        setErrorMessage(error instanceof Error ? error.message : 'Failed to start debate run');
+        setActivity(null);
       }
     };
 
-    source.onerror = () => {
-      setRunInProgress(false);
-      setErrorMessage('Streaming connection ended unexpectedly.');
-      setActivity(null);
-      source.close();
-      eventSourceRef.current = null;
-    };
+    void startDebate();
   };
 
   return (
