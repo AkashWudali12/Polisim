@@ -5,6 +5,8 @@ import { nowEventTimestamp, type RunEvent } from '@/lib/run-events';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+/** Maximum serverless execution time (seconds). Vercel Hobby: up to 300; Pro: up to 800. Heartbeats keep the SSE connection alive; this sets how long the function may run. */
+export const maxDuration = 300;
 
 function parseMessages(raw: string | null): ChatMessage[] | null {
   if (raw == null) return null;
@@ -45,6 +47,10 @@ export function GET(req: NextRequest): NextResponse {
 
   const encoder = new TextEncoder();
   const abortController = new AbortController();
+  /** SSE comment heartbeat interval (ms). Keeps connection alive for proxies/CDN idle timeouts. Vercel serverless also has a max duration (e.g. 300s) that cannot be extended by heartbeats. */
+  const HEARTBEAT_INTERVAL_MS = 10_000;
+  const heartbeatPayload = encoder.encode(': heartbeat\n\n');
+
   const stream = new ReadableStream({
     start(controller) {
       let closed = false;
@@ -55,18 +61,24 @@ export function GET(req: NextRequest): NextResponse {
           return true;
         } catch {
           closed = true;
-          clearInterval(keepaliveId);
+          if (keepaliveId != null) {
+            clearInterval(keepaliveId);
+            keepaliveId = null;
+          }
           return false;
         }
       };
-      const keepaliveId = setInterval(() => {
-        safeEnqueue(encoder.encode(': ping\n\n'));
-      }, 15000);
+      let keepaliveId: ReturnType<typeof setInterval> | null = setInterval(() => {
+        safeEnqueue(heartbeatPayload);
+      }, HEARTBEAT_INTERVAL_MS);
 
       const closeStream = () => {
         if (closed) return;
         closed = true;
-        clearInterval(keepaliveId);
+        if (keepaliveId != null) {
+          clearInterval(keepaliveId);
+          keepaliveId = null;
+        }
         try {
           controller.close();
         } catch {
