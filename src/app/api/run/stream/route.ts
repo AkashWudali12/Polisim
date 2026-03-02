@@ -2,151 +2,142 @@ import { NextRequest, NextResponse } from 'next/server';
 import { runDebateSequence } from '@/app/api/_core/debate_orchestrator';
 import type { ChatMessage } from '@/app/api/problem_agent';
 import { nowEventTimestamp, type RunEvent } from '@/lib/run-events';
+import {
+  appendMessages,
+  createJob,
+  setJobStatus,
+  type JobStatus,
+} from '@/app/api/_core/job_store';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-/** Maximum serverless execution time (seconds). Vercel Hobby: up to 300; Pro: up to 800. Heartbeats keep the SSE connection alive; this sets how long the function may run. */
 export const maxDuration = 700;
 
-function parseMessages(raw: string | null): ChatMessage[] | null {
-  if (raw == null) return null;
-
-  try {
-    const messages = JSON.parse(raw) as ChatMessage[];
-    if (!Array.isArray(messages)) return null;
-    for (const message of messages) {
-      if (
-        message == null ||
-        typeof message.sender !== 'string' ||
-        typeof message.message !== 'string'
-      ) {
-        return null;
-      }
-    }
-    return messages;
-  } catch {
-    return null;
-  }
+interface RunStartRequestBody {
+  messages?: ChatMessage[];
+  firstIdeology?: string;
+  secondIdeology?: string;
 }
 
-export function GET(req: NextRequest): NextResponse {
-  const { searchParams } = new URL(req.url);
-  const messages = parseMessages(searchParams.get('messages'));
-  const firstIdeology = (searchParams.get('firstIdeology') ?? '').trim();
-  const secondIdeology = (searchParams.get('secondIdeology') ?? '').trim();
+function validateMessages(messages: ChatMessage[] | undefined): messages is ChatMessage[] {
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages) {
+    if (
+      message == null ||
+      typeof message.sender !== 'string' ||
+      typeof message.message !== 'string'
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
-  if (!messages || !firstIdeology || !secondIdeology) {
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  let body: RunStartRequestBody;
+  try {
+    body = (await req.json()) as RunStartRequestBody;
+  } catch {
     return NextResponse.json(
       {
         error:
-          'Missing/invalid query params. Expected messages(JSON), firstIdeology, and secondIdeology.',
+          'Invalid JSON body. Expected { messages, firstIdeology, secondIdeology }.',
       },
       { status: 400 },
     );
   }
 
-  const encoder = new TextEncoder();
+  const { messages, firstIdeology, secondIdeology } = body;
+
+  if (!validateMessages(messages) || !firstIdeology?.trim() || !secondIdeology?.trim()) {
+    return NextResponse.json(
+      {
+        error:
+          'Invalid request body. Expected messages (Array<{ sender: string; message: string }>), firstIdeology, and secondIdeology.',
+      },
+      { status: 400 },
+    );
+  }
+
+  const job = createJob<RunEvent>('debate');
+
   const abortController = new AbortController();
-  /** SSE comment heartbeat interval (ms). Keeps connection alive for proxies/CDN idle timeouts. Vercel serverless also has a max duration (e.g. 300s) that cannot be extended by heartbeats. */
-  const HEARTBEAT_INTERVAL_MS = 10_000;
-  const heartbeatPayload = encoder.encode(': heartbeat\n\n');
 
-  const stream = new ReadableStream({
-    start(controller) {
-      let closed = false;
-      const safeEnqueue = (payload: Uint8Array): boolean => {
-        if (closed) return false;
-        try {
-          controller.enqueue(payload);
-          return true;
-        } catch {
-          closed = true;
-          if (keepaliveId != null) {
-            clearInterval(keepaliveId);
-            keepaliveId = null;
-          }
-          return false;
-        }
-      };
-      let keepaliveId: ReturnType<typeof setInterval> | null = setInterval(() => {
-        safeEnqueue(heartbeatPayload);
-      }, HEARTBEAT_INTERVAL_MS);
+  const initialEvent: RunEvent = {
+    type: 'run_stage',
+    stage: 'chatting',
+    message: 'Starting debate run',
+    timestamp: nowEventTimestamp(),
+  };
+  appendMessages<RunEvent>(job.id, [initialEvent]);
 
-      const closeStream = () => {
-        if (closed) return;
-        closed = true;
-        if (keepaliveId != null) {
-          clearInterval(keepaliveId);
-          keepaliveId = null;
-        }
-        try {
-          controller.close();
-        } catch {
-          // Stream already closed by runtime/client.
-        }
-      };
-
-      const emit = (event: RunEvent) => {
-        safeEnqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-      };
-
-      emit({
-        type: 'run_stage',
-        stage: 'chatting',
-        message: 'Starting streamed run',
-        timestamp: nowEventTimestamp(),
-      });
-
-      void runDebateSequence(
+  void (async () => {
+    setJobStatus(job.id, 'running' satisfies JobStatus);
+    try {
+      await runDebateSequence(
         {
           messages,
-          firstIdeology,
-          secondIdeology,
+          firstIdeology: firstIdeology.trim(),
+          secondIdeology: secondIdeology.trim(),
           abortSignal: abortController.signal,
         },
         {
-          onStage: ({ stage, message }) =>
-            emit({ type: 'run_stage', stage, message, timestamp: nowEventTimestamp() }),
-          onModelOutput: ({ kind, title, content, messageId }) =>
-            emit({
-              type: 'model_output',
-              kind,
-              title,
-              content,
-              messageId,
-              timestamp: nowEventTimestamp(),
-            }),
-          onActivity: ({ kind, message }) =>
-            emit({ type: 'agent_activity', kind, message, timestamp: nowEventTimestamp() }),
+          onStage: ({ stage, message }) => {
+            appendMessages<RunEvent>(job.id, [
+              {
+                type: 'run_stage',
+                stage,
+                message,
+                timestamp: nowEventTimestamp(),
+              },
+            ]);
+          },
+          onModelOutput: ({ kind, title, content, messageId }) => {
+            appendMessages<RunEvent>(job.id, [
+              {
+                type: 'model_output',
+                kind,
+                title,
+                content,
+                messageId,
+                timestamp: nowEventTimestamp(),
+              },
+            ]);
+          },
+          onActivity: ({ kind, message }) => {
+            appendMessages<RunEvent>(job.id, [
+              {
+                type: 'agent_activity',
+                kind,
+                message,
+                timestamp: nowEventTimestamp(),
+              },
+            ]);
+          },
         },
-      )
-        .then(() => {
-          emit({
-            type: 'run_done',
-            message: 'Debate run finished successfully',
-            timestamp: nowEventTimestamp(),
-          });
-          closeStream();
-        })
-        .catch((error: unknown) => {
-          emit({
-            type: 'run_error',
-            message: error instanceof Error ? error.message : 'Unknown error during run',
-            timestamp: nowEventTimestamp(),
-          });
-          closeStream();
-        });
-    },
-    cancel() {
-      abortController.abort('client_disconnected');
-    },
-  });
+      );
 
-  return new NextResponse(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-    },
-  });
+      appendMessages<RunEvent>(job.id, [
+        {
+          type: 'run_done',
+          message: 'Debate run finished successfully',
+          timestamp: nowEventTimestamp(),
+        },
+      ]);
+      setJobStatus(job.id, 'completed' satisfies JobStatus);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown error during debate run';
+      appendMessages<RunEvent>(job.id, [
+        {
+          type: 'run_error',
+          message,
+          timestamp: nowEventTimestamp(),
+        },
+      ]);
+      setJobStatus(job.id, 'error' satisfies JobStatus, message);
+    }
+  })();
+
+  return NextResponse.json({ jobId: job.id });
 }
