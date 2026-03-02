@@ -1,4 +1,4 @@
-import { generateText, Output, tool, stepCountIs } from 'ai';
+import { generateText, NoOutputGeneratedError, Output, tool, stepCountIs } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { Problem } from './problem_agent';
@@ -481,15 +481,20 @@ export async function generateThesis(
     const outputDescription =
         'JSON with message (string or Evidence: source, quote, reasoning) and thesis_field: -1 when done, or 1–5 for thesis, evidence, cost_estimate, weaknesses, risk_scenarios.';
 
+    const maxConsecutiveNoOutput = 3;
+    let consecutiveNoOutput = 0;
+
     while (true) {
         callbacks?.onActivity?.({ kind: 'thinking', message: 'Analyzing next thesis update' });
         const statusBlock = thesisStatusPromptBlock(thesis);
         const messageId = crypto.randomUUID();
-        const response = await generateText({
-            model: openai('gpt-5.2'),
-            system: systemPrompt,
-            prompt:
-                `Work on your thesis autonomously.
+        let output: unknown = null;
+        try {
+            const response = await generateText({
+                model: openai('gpt-5.2'),
+                system: systemPrompt,
+                prompt:
+                    `Work on your thesis autonomously.
 
 ${statusBlock}
 
@@ -500,30 +505,55 @@ Rules:
 - Evidence is "done" only when there are at least 5 evidence items.
 - You MUST finish this step by returning a valid ResearchResponse object with thesis_field and non-empty message (string for fields 1/3/4/5, Evidence object for field 2).
 - Return -1 only when all thesis fields are complete.`,
-            output: Output.object({
-                schema: researchResponseSchema,
-                name: 'ResearchResponse',
-                description: outputDescription,
-            }),
-            tools: {
-                getAvailableContext,
-                getContext,
-                getThesisField,
-                getSearchedLinks,
-                webSearch,
-                extractUrl,
-            },
-            experimental_onToolCallStart: ({ toolCall }) => {
-                const activityMessage = mapResearchToolToActivity(toolCall.toolName);
-                callbacks?.onActivity?.({ kind: 'tool_activity', message: activityMessage });
-                if (callbacks == null) {
-                    logResearchToolCall(toolCall.toolName, toolCall.input ?? {});
+                output: Output.object({
+                    schema: researchResponseSchema,
+                    name: 'ResearchResponse',
+                    description: outputDescription,
+                }),
+                tools: {
+                    getAvailableContext,
+                    getContext,
+                    getThesisField,
+                    getSearchedLinks,
+                    webSearch,
+                    extractUrl,
+                },
+                experimental_onToolCallStart: ({ toolCall }) => {
+                    const activityMessage = mapResearchToolToActivity(toolCall.toolName);
+                    callbacks?.onActivity?.({ kind: 'tool_activity', message: activityMessage });
+                    if (callbacks == null) {
+                        logResearchToolCall(toolCall.toolName, toolCall.input ?? {});
+                    }
+                },
+                stopWhen: stepCountIs(10),
+                abortSignal: options?.abortSignal,
+            });
+            output = response.output;
+        } catch (err) {
+            if (NoOutputGeneratedError.isInstance(err)) {
+                consecutiveNoOutput += 1;
+                callbacks?.onActivity?.({
+                    kind: 'thinking',
+                    message: `No structured output this step (${consecutiveNoOutput}/${maxConsecutiveNoOutput}), retrying.`,
+                });
+                if (consecutiveNoOutput >= maxConsecutiveNoOutput) {
+                    const hasAnyContent =
+                        thesis.thesis.trim().length > 0 ||
+                        thesis.evidence.length > 0 ||
+                        thesis.cost_estimate.trim().length > 0 ||
+                        thesis.weaknesses.trim().length > 0 ||
+                        thesis.risk_scenarios.trim().length > 0;
+                    if (hasAnyContent) {
+                        callbacks?.onActivity?.({ kind: 'thinking', message: 'Using current thesis as fallback after repeated no-output steps.' });
+                        return cleanUp();
+                    }
+                    throw err;
                 }
-            },
-            stopWhen: stepCountIs(10),
-            abortSignal: options?.abortSignal,
-        });
-        const output = response.output;
+                continue;
+            }
+            throw err;
+        }
+        consecutiveNoOutput = 0;
 
         if (output == null) {
             continue;

@@ -1,4 +1,4 @@
-import { generateText, Output } from 'ai';
+import { generateText, NoOutputGeneratedError, Output } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { type Problem } from './problem_agent';
@@ -37,9 +37,12 @@ export async function generate_questions(
   const callbacks = options?.callbacks;
   const messageId = options?.messageId ?? crypto.randomUUID();
 
-  const result = await generateText({
-    model: openai('gpt-4o'),
-    system: `You are a policy debate strategist. Generate sharp, fair, specific cross-examination questions for an opposing thesis.
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await generateText({
+        model: openai('gpt-4o'),
+        system: `You are a policy debate strategist. Generate sharp, fair, specific cross-examination questions for an opposing thesis.
 
 Rules:
 - Return exactly ${n} questions.
@@ -47,7 +50,7 @@ Rules:
 - Questions must be grounded in the provided problem and opposing thesis.
 - Keep each question concise and clear.
 - Output must be valid JSON matching the schema.`,
-    prompt: `Problem:
+        prompt: `Problem:
 ${JSON.stringify(problem, null, 2)}
 
 Generating agent ideology:
@@ -56,25 +59,31 @@ ${politicalIdeology}
 Opposing thesis:
 ${JSON.stringify(opposingThesis, null, 2)}
 `,
-    output: Output.object({
-      schema: questionListSchema,
-      name: 'QuestionList',
-      description: `A list of exactly ${n} cross-examination questions.`,
-    }),
-    abortSignal: options?.abortSignal,
-  });
-  const output = result.output;
-
-  if (output == null) {
-    throw new Error('Model did not return a valid question list.');
+        output: Output.object({
+          schema: questionListSchema,
+          name: 'QuestionList',
+          description: `A list of exactly ${n} cross-examination questions.`,
+        }),
+        abortSignal: options?.abortSignal,
+      });
+      const output = result.output;
+      if (output == null) {
+        if (attempt < maxAttempts) continue;
+        throw new Error('Model did not return a valid question list.');
+      }
+      callbacks?.onModelOutput?.({
+        kind: 'questions',
+        title: 'Cross-Examination Questions',
+        content: output.questions,
+        messageId,
+      });
+      return output.questions;
+    } catch (err) {
+      if (NoOutputGeneratedError.isInstance(err) && attempt < maxAttempts) {
+        continue;
+      }
+      throw err;
+    }
   }
-
-  callbacks?.onModelOutput?.({
-    kind: 'questions',
-    title: 'Cross-Examination Questions',
-    content: output.questions,
-    messageId,
-  });
-
-  return output.questions;
+  throw new Error('Question generation failed after retries: no structured output.');
 }

@@ -1,4 +1,4 @@
-import { generateText, Output } from 'ai';
+import { generateText, NoOutputGeneratedError, Output } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
 import type { RunCallbacks } from '@/lib/run-events';
@@ -92,22 +92,32 @@ export async function generate_problem(
   options?: StreamedGenerationOptions,
 ): Promise<Problem> {
   const transcript = formatMessagesAsTranscript(messages);
+  const maxAttempts = 2;
 
-  const result = await generateText({
-    model: openai('gpt-4o'),
-    system: PROBLEM_AGENT_SYSTEM_PROMPT,
-    prompt: transcript,
-    output: Output.object({
-      schema: problemSchema,
-      name: 'Problem',
-      description:
-        'A structured policy debate problem with question, scope, time horizon, jurisdiction, and constraints.',
-    }),
-    abortSignal: options?.abortSignal,
-  });
-  const output = result.output;
-
-  return problemSchema.parse(output);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await generateText({
+        model: openai('gpt-4o'),
+        system: PROBLEM_AGENT_SYSTEM_PROMPT,
+        prompt: transcript,
+        output: Output.object({
+          schema: problemSchema,
+          name: 'Problem',
+          description:
+            'A structured policy debate problem with question, scope, time horizon, jurisdiction, and constraints.',
+        }),
+        abortSignal: options?.abortSignal,
+      });
+      const output = result.output;
+      return problemSchema.parse(output);
+    } catch (err) {
+      if (NoOutputGeneratedError.isInstance(err) && attempt < maxAttempts) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Problem generation failed after retries: no structured output.');
 }
 
 /**
@@ -128,26 +138,36 @@ export async function generate_chatbot_response(
   const transcript =
     messages.length > 0 ? formatMessagesAsTranscript(messages) : '(No messages yet)';
 
-  const result = await generateText({
-    model: openai('gpt-4o'),
-    system: CHATBOT_SYSTEM_PROMPT,
-    prompt: transcript,
-    output: Output.object({
-      schema: conversationResponseSchema,
-      name: 'ConversationResponse',
-      description:
-        'Assistant message and whether there is enough information to generate a problem (yes/no).',
-    }),
-    abortSignal: options?.abortSignal,
-  });
-  const output = result.output;
-  const parsed = conversationResponseSchema.parse(output);
-
-  callbacks?.onModelOutput?.({
-    kind: 'chat_response',
-    title: 'Assistant',
-    content: parsed.message,
-    messageId,
-  });
-  return parsed;
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await generateText({
+        model: openai('gpt-4o'),
+        system: CHATBOT_SYSTEM_PROMPT,
+        prompt: transcript,
+        output: Output.object({
+          schema: conversationResponseSchema,
+          name: 'ConversationResponse',
+          description:
+            'Assistant message and whether there is enough information to generate a problem (yes/no).',
+        }),
+        abortSignal: options?.abortSignal,
+      });
+      const output = result.output;
+      const parsed = conversationResponseSchema.parse(output);
+      callbacks?.onModelOutput?.({
+        kind: 'chat_response',
+        title: 'Assistant',
+        content: parsed.message,
+        messageId,
+      });
+      return parsed;
+    } catch (err) {
+      if (NoOutputGeneratedError.isInstance(err) && attempt < maxAttempts) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Chatbot response failed after retries: no structured output.');
 }

@@ -1,4 +1,4 @@
-import { generateText, Output, stepCountIs, tool } from 'ai';
+import { generateText, NoOutputGeneratedError, Output, stepCountIs, tool } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { type Problem } from './problem_agent';
@@ -143,6 +143,12 @@ function classifyParseFailure(error: unknown): {
   category: DebateParseFailureCategory;
   message: string;
 } {
+  if (NoOutputGeneratedError.isInstance(error)) {
+    return {
+      category: 'missing_output',
+      message: error.message ?? 'No output generated.',
+    };
+  }
   const message = error instanceof Error ? error.message : String(error ?? 'Unknown parse error');
   const lowered = message.toLowerCase();
   if (
@@ -241,10 +247,22 @@ ${params.question}`,
     }),
     abortSignal: params.abortSignal,
   });
-  const output = result.output;
-
+  let output: { answer: string } | null = null;
+  try {
+    output = result.output;
+  } catch (err) {
+    if (NoOutputGeneratedError.isInstance(err)) {
+      output = {
+        answer: `[Fallback: Could not generate structured answer for this question. Reaffirming position from thesis.]`,
+      };
+    } else {
+      throw err;
+    }
+  }
   if (output == null) {
-    throw new Error('Crossfire answer generation failed: missing output.');
+    output = {
+      answer: `[Fallback: No structured answer returned. Reaffirming position from thesis.]`,
+    };
   }
 
   params.callbacks?.onModelOutput?.({
