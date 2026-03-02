@@ -10,6 +10,17 @@ interface GenerateQuestionsOptions {
   abortSignal?: AbortSignal;
 }
 
+function logQuestionGeneration(event: string, meta: Record<string, unknown>): void {
+  console.info(
+    JSON.stringify({
+      scope: 'question_generation',
+      event,
+      timestamp: new Date().toISOString(),
+      ...meta,
+    }),
+  );
+}
+
 /**
  * Generates a list of cross-examination questions for an opposing thesis.
  *
@@ -36,9 +47,15 @@ export async function generate_questions(
 
   const callbacks = options?.callbacks;
   const messageId = options?.messageId ?? crypto.randomUUID();
+  logQuestionGeneration('generate_questions_start', {
+    requestedCount: n,
+    ideologyLength: politicalIdeology.length,
+    hasAbortSignal: Boolean(options?.abortSignal),
+  });
 
   const maxAttempts = 2;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    logQuestionGeneration('generate_questions_attempt_start', { attempt, maxAttempts });
     try {
       const result = await generateText({
         model: openai('gpt-4o'),
@@ -77,8 +94,17 @@ ${JSON.stringify(opposingThesis, null, 2)}
         content: output.questions,
         messageId,
       });
+      logQuestionGeneration('generate_questions_success', {
+        attempt,
+        returnedCount: output.questions.length,
+        messageId,
+      });
       return output.questions;
     } catch (err) {
+      logQuestionGeneration('generate_questions_attempt_failed', {
+        attempt,
+        isNoOutput: NoOutputGeneratedError.isInstance(err),
+      });
       if (NoOutputGeneratedError.isInstance(err) && attempt < maxAttempts) {
         continue;
       }

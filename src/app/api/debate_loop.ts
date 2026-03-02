@@ -280,6 +280,17 @@ interface RunDebateLoopOptions {
   abortSignal?: AbortSignal;
 }
 
+function logDebateLoop(event: string, meta: Record<string, unknown>): void {
+  console.info(
+    JSON.stringify({
+      scope: 'debate_loop',
+      event,
+      timestamp: new Date().toISOString(),
+      ...meta,
+    }),
+  );
+}
+
 export async function runDebateLoop(
   params: RunDebateLoopParams,
   options?: RunDebateLoopOptions,
@@ -296,6 +307,13 @@ export async function runDebateLoop(
   } = params;
   const callbacks = options?.callbacks;
   const abortSignal = options?.abortSignal;
+  const startedAt = Date.now();
+  logDebateLoop('debate_loop_start', {
+    maxRounds,
+    firstQuestionCount: firstAgentQuestionsForSecond.length,
+    secondQuestionCount: secondAgentQuestionsForFirst.length,
+    hasAbortSignal: Boolean(abortSignal),
+  });
 
   const contextCache = new Map<string, [string, string]>();
 
@@ -334,6 +352,7 @@ export async function runDebateLoop(
   };
 
   for (const question of firstAgentQuestionsForSecond) {
+    logDebateLoop('crossfire_first_question_start', { questionLength: question.length });
     callbacks?.onActivity?.({ kind: 'thinking', message: 'Preparing crossfire response' });
     const answer = await answerCrossfireQuestion({
       problem,
@@ -345,12 +364,14 @@ export async function runDebateLoop(
     });
     const pair: CrossfirePair = { question, answer };
     crossfire.firstAgentCrossfire.push(pair);
+    logDebateLoop('crossfire_first_question_complete', { answerLength: answer.length });
     await addMessageToContext(
       `CROSSFIRE (first asked, second answered)\nQ: ${question}\nA: ${answer}`,
     );
   }
 
   for (const question of secondAgentQuestionsForFirst) {
+    logDebateLoop('crossfire_second_question_start', { questionLength: question.length });
     callbacks?.onActivity?.({ kind: 'thinking', message: 'Preparing crossfire response' });
     const answer = await answerCrossfireQuestion({
       problem,
@@ -362,6 +383,7 @@ export async function runDebateLoop(
     });
     const pair: CrossfirePair = { question, answer };
     crossfire.secondAgentCrossfire.push(pair);
+    logDebateLoop('crossfire_second_question_complete', { answerLength: answer.length });
     await addMessageToContext(
       `CROSSFIRE (second asked, first answered)\nQ: ${question}\nA: ${answer}`,
     );
@@ -583,6 +605,11 @@ Return only valid JSON. No prose, no markdown, no backticks.`;
   for (let turn = 0; turn < totalTurns; turn += 1) {
     const speaker: AgentSide = turn % 2 === 0 ? 'first' : 'second';
     const opponent: AgentSide = speaker === 'first' ? 'second' : 'first';
+    logDebateLoop('turn_start', {
+      turn: turn + 1,
+      speaker,
+      hasPendingProposal: pendingProposal != null,
+    });
     callbacks?.onActivity?.({ kind: 'thinking', message: 'Analyzing debate turn' });
     const pendingText =
       pendingProposal == null
@@ -603,6 +630,12 @@ Respond with one structured output item now.`;
 
     for (let attempt = 0; attempt <= debateTurnMaxRetries; attempt += 1) {
       const toolsMode: DebateTurnToolsMode = attempt === 0 ? 'full_tools' : 'retry_limited_tools';
+      logDebateLoop('turn_attempt_start', {
+        turn: turn + 1,
+        speaker,
+        attempt: attempt + 1,
+        toolsMode,
+      });
       const prompt =
         attempt === 0
           ? turnPrompt
@@ -622,6 +655,13 @@ Respond with one structured output item now.`;
       messageId = attemptResult.messageId;
       if (attemptResult.output != null) {
         output = attemptResult.output;
+        logDebateLoop('turn_attempt_success', {
+          turn: turn + 1,
+          speaker,
+          attempt: attempt + 1,
+          kind: output.kind,
+          contentLength: output.content.length,
+        });
         break;
       }
 
@@ -629,6 +669,12 @@ Respond with one structured output item now.`;
         attemptResult.failureMessage ??
         `No structured object generated (${attemptResult.failureCategory ?? 'unknown'}).`;
       const failureCategory = attemptResult.failureCategory ?? 'provider_parse_error';
+      logDebateLoop('turn_attempt_failed', {
+        turn: turn + 1,
+        speaker,
+        attempt: attempt + 1,
+        failureCategory,
+      });
       callbacks?.onActivity?.({
         kind: 'thinking',
         message:
@@ -678,6 +724,12 @@ Respond with one structured output item now.`;
     }
 
     debateTranscript.push({ speaker, turn, output });
+    logDebateLoop('turn_committed', {
+      turn: turn + 1,
+      speaker,
+      kind: output.kind,
+      transcriptCount: debateTranscript.length,
+    });
     callbacks?.onModelOutput?.({
       kind: 'debate_turn',
       title: `Debate Turn ${turn + 1}`,
@@ -697,6 +749,10 @@ Respond with one structured output item now.`;
     );
     if (output.kind === 'proposed_solution') {
       pendingProposal = { proposer: speaker, text: output.content };
+      logDebateLoop('proposal_created', {
+        proposer: speaker,
+        proposalLength: output.content.length,
+      });
       debateSummary = await summarizeMessage(
         formatDebateStateForSummary({
           crossfire,
@@ -710,6 +766,7 @@ Respond with one structured output item now.`;
 
     if (output.kind === 'deny_solution') {
       pendingProposal = null;
+      logDebateLoop('proposal_denied', { by: speaker, turn: turn + 1 });
       debateSummary = await summarizeMessage(
         formatDebateStateForSummary({
           crossfire,
@@ -739,6 +796,12 @@ Respond with one structured output item now.`;
         title: 'Debate Resolution',
         content: parsed.data.resolution,
       });
+      logDebateLoop('debate_loop_resolved', {
+        acceptedBy: speaker,
+        stopReason: 'agreement',
+        transcriptCount: debateTranscript.length,
+        elapsedMs: Date.now() - startedAt,
+      });
       return parsed.data;
     }
 
@@ -767,6 +830,10 @@ Respond with one structured output item now.`;
     kind: 'debate_result',
     title: 'Debate Resolution',
     content: parsed.data.resolution,
+  });
+  logDebateLoop('debate_loop_complete_max_rounds', {
+    transcriptCount: parsed.data.debateTranscript.length,
+    elapsedMs: Date.now() - startedAt,
   });
   return parsed.data;
 }

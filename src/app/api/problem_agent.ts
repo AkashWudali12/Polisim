@@ -48,6 +48,17 @@ interface StreamedGenerationOptions {
   abortSignal?: AbortSignal;
 }
 
+function logProblemAgent(event: string, meta: Record<string, unknown>): void {
+  console.info(
+    JSON.stringify({
+      scope: 'problem_agent',
+      event,
+      timestamp: new Date().toISOString(),
+      ...meta,
+    }),
+  );
+}
+
 const PROBLEM_AGENT_SYSTEM_PROMPT = `You are an expert at framing policy debate problems. Given a conversation (as a transcript), extract or formulate a well-defined debate problem and fill in the following fields. Respond ONLY with valid JSON matching the schema.
 
 Field definitions:
@@ -93,8 +104,14 @@ export async function generate_problem(
 ): Promise<Problem> {
   const transcript = formatMessagesAsTranscript(messages);
   const maxAttempts = 2;
+  logProblemAgent('generate_problem_start', {
+    messageCount: messages.length,
+    transcriptLength: transcript.length,
+    hasAbortSignal: Boolean(options?.abortSignal),
+  });
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    logProblemAgent('generate_problem_attempt_start', { attempt, maxAttempts });
     try {
       const result = await generateText({
         model: openai('gpt-4o'),
@@ -109,8 +126,13 @@ export async function generate_problem(
         abortSignal: options?.abortSignal,
       });
       const output = result.output;
+      logProblemAgent('generate_problem_success', { attempt });
       return problemSchema.parse(output);
     } catch (err) {
+      logProblemAgent('generate_problem_attempt_failed', {
+        attempt,
+        isNoOutput: NoOutputGeneratedError.isInstance(err),
+      });
       if (NoOutputGeneratedError.isInstance(err) && attempt < maxAttempts) {
         continue;
       }
@@ -137,9 +159,15 @@ export async function generate_chatbot_response(
   const messageId = options?.messageId ?? crypto.randomUUID();
   const transcript =
     messages.length > 0 ? formatMessagesAsTranscript(messages) : '(No messages yet)';
+  logProblemAgent('chat_response_start', {
+    messageCount: messages.length,
+    transcriptLength: transcript.length,
+    hasAbortSignal: Boolean(options?.abortSignal),
+  });
 
   const maxAttempts = 2;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    logProblemAgent('chat_response_attempt_start', { attempt, maxAttempts, messageId });
     try {
       const result = await generateText({
         model: openai('gpt-4o'),
@@ -161,8 +189,19 @@ export async function generate_chatbot_response(
         content: parsed.message,
         messageId,
       });
+      logProblemAgent('chat_response_success', {
+        attempt,
+        messageId,
+        canGenerateProblem: parsed.can_generate_problem,
+        responseLength: parsed.message.length,
+      });
       return parsed;
     } catch (err) {
+      logProblemAgent('chat_response_attempt_failed', {
+        attempt,
+        messageId,
+        isNoOutput: NoOutputGeneratedError.isInstance(err),
+      });
       if (NoOutputGeneratedError.isInstance(err) && attempt < maxAttempts) {
         continue;
       }
