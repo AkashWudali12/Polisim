@@ -34,6 +34,7 @@ function validateMessages(messages: ChatMessage[] | undefined): messages is Chat
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  console.info('[api/run/stream] POST handler started');
   let body: RunStartRequestBody;
   try {
     body = (await req.json()) as RunStartRequestBody;
@@ -59,7 +60,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  const job = createJob<RunEvent>('debate');
+  const job = await createJob<RunEvent>('debate');
+  console.info(
+    JSON.stringify({
+      event: 'job_created',
+      route: 'run/stream',
+      jobId: job.id,
+      jobType: 'debate',
+    }),
+  );
 
   const abortController = new AbortController();
 
@@ -69,10 +78,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     message: 'Starting debate run',
     timestamp: nowEventTimestamp(),
   };
-  appendMessages<RunEvent>(job.id, [initialEvent]);
+  await appendMessages<RunEvent>(job.id, [initialEvent]);
 
   void (async () => {
-    setJobStatus(job.id, 'running' satisfies JobStatus);
+    console.info(`[api/run/stream] background runner started for job ${job.id}`);
+    await setJobStatus(job.id, 'running' satisfies JobStatus);
     try {
       await runDebateSequence(
         {
@@ -83,7 +93,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         },
         {
           onStage: ({ stage, message }) => {
-            appendMessages<RunEvent>(job.id, [
+            void appendMessages<RunEvent>(job.id, [
               {
                 type: 'run_stage',
                 stage,
@@ -93,7 +103,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ]);
           },
           onModelOutput: ({ kind, title, content, messageId }) => {
-            appendMessages<RunEvent>(job.id, [
+            void appendMessages<RunEvent>(job.id, [
               {
                 type: 'model_output',
                 kind,
@@ -105,7 +115,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ]);
           },
           onActivity: ({ kind, message }) => {
-            appendMessages<RunEvent>(job.id, [
+            void appendMessages<RunEvent>(job.id, [
               {
                 type: 'agent_activity',
                 kind,
@@ -117,27 +127,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         },
       );
 
-      appendMessages<RunEvent>(job.id, [
+      await appendMessages<RunEvent>(job.id, [
         {
           type: 'run_done',
           message: 'Debate run finished successfully',
           timestamp: nowEventTimestamp(),
         },
       ]);
-      setJobStatus(job.id, 'completed' satisfies JobStatus);
+      await setJobStatus(job.id, 'completed' satisfies JobStatus);
+      console.info(`[api/run/stream] background runner completed for job ${job.id}`);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Unknown error during debate run';
-      appendMessages<RunEvent>(job.id, [
+      await appendMessages<RunEvent>(job.id, [
         {
           type: 'run_error',
           message,
           timestamp: nowEventTimestamp(),
         },
       ]);
-      setJobStatus(job.id, 'error' satisfies JobStatus, message);
+      await setJobStatus(job.id, 'error' satisfies JobStatus, message);
+      console.error(`[api/run/stream] background runner failed for job ${job.id}`);
     }
   })();
 
+  console.info(`[api/run/stream] returning jobId ${job.id}`);
   return NextResponse.json({ jobId: job.id });
 }

@@ -6,6 +6,7 @@ const requestSchemaError =
   'Invalid request body. Expected { messages: Array<{ sender: string; message: string }> }.';
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  console.info('[api/chat/turn] POST handler started');
   try {
     const body = (await req.json()) as { messages?: ChatMessage[] };
     if (!Array.isArray(body.messages)) {
@@ -23,8 +24,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const { response } = await runChatTurn(body.messages);
+    console.info('[api/chat/turn] POST handler completed');
     return NextResponse.json(response);
   } catch (error) {
+    console.error('[api/chat/turn] POST handler failed');
     const message = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json({ error: `Failed to generate chat turn: ${message}` }, { status: 500 });
   }

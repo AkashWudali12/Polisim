@@ -28,6 +28,7 @@ function validateMessages(messages: ChatMessage[] | undefined): messages is Chat
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  console.info('[api/chat/turn/start] POST handler started');
   let body: ChatTurnStartRequestBody;
   try {
     body = (await req.json()) as ChatTurnStartRequestBody;
@@ -39,21 +40,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: requestSchemaError }, { status: 400 });
   }
 
-  const job = createJob<{ message: string; can_generate_problem: string }>('chat_turn');
+  const job = await createJob<{ message: string; can_generate_problem: string }>('chat_turn');
+  console.info(
+    JSON.stringify({
+      event: 'job_created',
+      route: 'chat/turn/start',
+      jobId: job.id,
+      jobType: 'chat_turn',
+    }),
+  );
 
   void (async () => {
-    setJobStatus(job.id, 'running' satisfies JobStatus);
+    console.info(`[api/chat/turn/start] background runner started for job ${job.id}`);
+    await setJobStatus(job.id, 'running' satisfies JobStatus);
     try {
       const { response } = await runChatTurn(body.messages!);
-      appendMessages(job.id, [response]);
-      setJobStatus(job.id, 'completed' satisfies JobStatus);
+      await appendMessages(job.id, [response]);
+      await setJobStatus(job.id, 'completed' satisfies JobStatus);
+      console.info(`[api/chat/turn/start] background runner completed for job ${job.id}`);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to generate chat turn response';
-      setJobStatus(job.id, 'error' satisfies JobStatus, message);
+      await setJobStatus(job.id, 'error' satisfies JobStatus, message);
+      console.error(`[api/chat/turn/start] background runner failed for job ${job.id}`);
     }
   })();
 
+  console.info(`[api/chat/turn/start] returning jobId ${job.id}`);
   return NextResponse.json({ jobId: job.id });
 }
 
