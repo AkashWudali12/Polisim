@@ -2,6 +2,8 @@
 
 **AI agents for constructive political debate.** Polisim explores whether AI can debate political issues in a structured, research-driven way — with the goal of finding practical compromises instead of escalating conflict.
 
+[**Demo**](https://youtu.be/Kk2EPhKEwbs)
+
 ## What it does
 
 - **Describe a political issue** — You give a prompt; the system turns it into a clear, debate-ready policy question.
